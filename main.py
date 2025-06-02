@@ -26,7 +26,6 @@ app.add_middleware(
 
 # Load model, tokenizer, and reference code
 try:
-    # Use a smaller model to reduce memory usage
     tokenizer = AutoTokenizer.from_pretrained("distilroberta-base")
     codebert = AutoModel.from_pretrained("distilroberta-base")
     model = joblib.load("classifier.joblib")
@@ -75,12 +74,12 @@ def extract_ast_features(code):
         return [0, 0, 0, 0]
 
 def extract_combined_features(texts, reference_code):
-    device = torch.device("cpu")  # Force CPU usage to reduce memory (CUDA not available on Render free tier)
-    global codebert  # Use the globally loaded model
+    device = torch.device("cpu")
+    global codebert
     codebert = codebert.to(device)
     codebert_features = []
     for text in texts:
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256, padding="max_length").to(device)  # Reduced max_length
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256, padding="max_length").to(device)
         with torch.no_grad():
             outputs = codebert(**inputs)
         codebert_features.append(outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy())
@@ -91,6 +90,10 @@ def extract_combined_features(texts, reference_code):
         np.array(lev_features).reshape(-1, 1),
         np.array(ast_features)
     ])
+
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the AI Detection Backend", "status": "healthy"}
 
 @app.post("/detect")
 async def detect_ai_code(input: CodeInput):
