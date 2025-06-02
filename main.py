@@ -9,6 +9,7 @@ from Levenshtein import distance
 import ast
 import logging
 import os
+import uvicorn
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -25,8 +26,9 @@ app.add_middleware(
 
 # Load model, tokenizer, and reference code
 try:
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base")
-    codebert = AutoModel.from_pretrained("microsoft/codebert-base")
+    # Use a smaller model to reduce memory usage
+    tokenizer = AutoTokenizer.from_pretrained("distilroberta-base")
+    codebert = AutoModel.from_pretrained("distilroberta-base")
     model = joblib.load("classifier.joblib")
     with open("reference_code.txt", "r", encoding="utf-8") as f:
         reference_code = f.read()
@@ -73,11 +75,12 @@ def extract_ast_features(code):
         return [0, 0, 0, 0]
 
 def extract_combined_features(texts, reference_code):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    codebert = AutoModel.from_pretrained("microsoft/codebert-base").to(device)
+    device = torch.device("cpu")  # Force CPU usage to reduce memory (CUDA not available on Render free tier)
+    global codebert  # Use the globally loaded model
+    codebert = codebert.to(device)
     codebert_features = []
     for text in texts:
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512, padding="max_length").to(device)
+        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256, padding="max_length").to(device)  # Reduced max_length
         with torch.no_grad():
             outputs = codebert(**inputs)
         codebert_features.append(outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy())
@@ -131,3 +134,8 @@ async def detect_code_similarity(input: SimilarityInput):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    logger.info(f"Starting Uvicorn on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
