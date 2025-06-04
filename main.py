@@ -26,9 +26,9 @@ app.add_middleware(
 
 # Load model, tokenizer, and reference code
 try:
-    tokenizer = AutoTokenizer.from_pretrained("distilroberta-base")
-    codebert = AutoModel.from_pretrained("distilroberta-base")
-    model = joblib.load("classifier.joblib")
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    model = AutoModel.from_pretrained("bert-base-uncased")
+    classifier = joblib.load("classifier.joblib")
     with open("reference_code.txt", "r", encoding="utf-8") as f:
         reference_code = f.read()
     logger.info("Model, tokenizer, and reference code loaded successfully")
@@ -75,18 +75,18 @@ def extract_ast_features(code):
 
 def extract_combined_features(texts, reference_code):
     device = torch.device("cpu")
-    global codebert
-    codebert = codebert.to(device)
-    codebert_features = []
+    global model
+    model = model.to(device)
+    model_features = []
     for text in texts:
         inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256, padding="max_length").to(device)
         with torch.no_grad():
-            outputs = codebert(**inputs)
-        codebert_features.append(outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy())
+            outputs = model(**inputs)
+        model_features.append(outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy())
     lev_features = [compute_levenshtein_similarity(text, reference_code) for text in texts]
     ast_features = [extract_ast_features(text) for text in texts]
     return np.hstack([
-        np.array(codebert_features),
+        np.array(model_features),
         np.array(lev_features).reshape(-1, 1),
         np.array(ast_features)
     ])
@@ -101,7 +101,7 @@ async def detect_ai_code(input: CodeInput):
         if not input.code.strip():
             raise HTTPException(status_code=400, detail="Code cannot be empty")
         features = extract_combined_features([input.code], reference_code)
-        prediction = model.predict_proba(features)[0]
+        prediction = classifier.predict_proba(features)[0]
         ai_percentage = float(prediction[1] * 100)
         logger.info(f"Processed code, AI percentage: {ai_percentage:.2f}%")
         return {"ai_percentage": round(ai_percentage, 2)}
