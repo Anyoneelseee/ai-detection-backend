@@ -10,9 +10,11 @@ import ast
 import logging
 import os
 import uvicorn
+import traceback
+from typing import List
 
 app = FastAPI()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)  # Set to DEBUG for more verbosity
 logger = logging.getLogger(__name__)
 
 # Add CORS middleware
@@ -40,14 +42,39 @@ class CodeInput(BaseModel):
     code: str
 
 class SimilarityInput(BaseModel):
-    codes: list[str]
+    codes: List[str]
+
+    # Add a custom validator to log the incoming data
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate_to_json
+
+    @classmethod
+    def validate_to_json(cls, value):
+        logger.debug(f"Validating SimilarityInput: {value}")
+        if isinstance(value, dict):
+            codes = value.get("codes")
+            if not isinstance(codes, list):
+                logger.error(f"Invalid 'codes' field: expected list, got {type(codes)}")
+                raise ValueError(f"'codes' must be a list, got {type(codes)}")
+            for idx, code in enumerate(codes):
+                if not isinstance(code, str):
+                    logger.error(f"Invalid code at index {idx}: expected string, got {type(code)} with value {code}")
+                    raise ValueError(f"Code at index {idx} must be a string, got {type(code)} with value {code}")
+                if not code.strip():
+                    logger.warning(f"Empty code string at index {idx}")
+        return cls(**value)
 
 def compute_levenshtein_similarity(code1, code2):
+    logger.debug(f"Computing Levenshtein similarity between code1 (len={len(code1)}) and code2 (len={len(code2)})")
     dist = distance(code1, code2)
     max_len = max(len(code1), len(code2))
-    return 1 - (dist / max_len) if max_len > 0 else 1
+    similarity = 1 - (dist / max_len) if max_len > 0 else 1
+    logger.debug(f"Levenshtein distance: {dist}, max_len: {max_len}, similarity: {similarity}")
+    return similarity
 
 def get_ast_max_depth(node, current_depth=0):
+    logger.debug(f"Computing AST max depth at depth {current_depth}")
     if not isinstance(node, ast.AST):
         return current_depth
     max_child_depth = current_depth
@@ -63,14 +90,17 @@ def get_ast_max_depth(node, current_depth=0):
     return max_child_depth
 
 def extract_ast_features(code):
+    logger.debug(f"Extracting AST features for code: {code[:50]}...")
     try:
         tree = ast.parse(code)
         num_nodes = sum(1 for _ in ast.walk(tree))
         max_depth = get_ast_max_depth(tree)
         func_defs = sum(1 for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
         loops = sum(1 for node in ast.walk(tree) if isinstance(node, (ast.For, ast.While)))
+        logger.debug(f"AST features - num_nodes: {num_nodes}, max_depth: {max_depth}, func_defs: {func_defs}, loops: {loops}")
         return [num_nodes, max_depth, func_defs, loops]
-    except SyntaxError:
+    except SyntaxError as e:
+        logger.warning(f"SyntaxError in AST parsing: {str(e)}")
         return [0, 0, 0, 0]
 
 def extract_combined_features(texts, reference_code):
@@ -78,13 +108,16 @@ def extract_combined_features(texts, reference_code):
     global model
     model = model.to(device)
     model_features = []
-    for text in texts:
+    logger.debug(f"Extracting combined features for {len(texts)} texts")
+    for idx, text in enumerate(texts):
+        logger.debug(f"Processing text {idx}: {text[:50]}...")
         inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=256, padding="max_length").to(device)
         with torch.no_grad():
             outputs = model(**inputs)
         model_features.append(outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy())
     lev_features = [compute_levenshtein_similarity(text, reference_code) for text in texts]
     ast_features = [extract_ast_features(text) for text in texts]
+    logger.debug(f"Combining features: model_features shape: {np.array(model_features).shape}, lev_features: {lev_features}, ast_features: {ast_features}")
     return np.hstack([
         np.array(model_features),
         np.array(lev_features).reshape(-1, 1),
@@ -93,12 +126,16 @@ def extract_combined_features(texts, reference_code):
 
 @app.get("/")
 async def root():
+    logger.info("Root endpoint accessed")
     return {"message": "Welcome to the AI Detection Backend", "status": "healthy"}
 
 @app.post("/detect")
 async def detect_ai_code(input: CodeInput):
+    logger.info("Received /detect request")
+    logger.debug(f"Input code: {input.code[:50]}...")
     try:
         if not input.code.strip():
+            logger.error("Code is empty")
             raise HTTPException(status_code=400, detail="Code cannot be empty")
         features = extract_combined_features([input.code], reference_code)
         prediction = classifier.predict_proba(features)[0]
@@ -109,33 +146,52 @@ async def detect_ai_code(input: CodeInput):
         logger.error(f"Value error in AI detection: {str(ve)}")
         raise HTTPException(status_code=400, detail=f"Invalid input: {str(ve)}")
     except Exception as e:
-        logger.error(f"Error processing code: {str(e)}")
+        logger.error(f"Error processing code: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Server error during AI detection: {str(e)}")
 
 @app.post("/similarity")
 async def detect_code_similarity(input: SimilarityInput):
+    logger.info("Received /similarity request")
+    logger.debug(f"Input codes: {[code[:50] + '...' for code in input.codes]}")
     try:
+        # Validate input
         if not input.codes or len(input.codes) < 2:
+            logger.error(f"Insufficient codes: {len(input.codes)} provided, at least 2 required")
             raise HTTPException(status_code=400, detail="At least two code samples are required")
-        
+
+        # Check for empty or invalid codes
+        valid_codes = []
+        for idx, code in enumerate(input.codes):
+            if not code.strip():
+                logger.warning(f"Skipping empty code at index {idx}")
+                continue
+            valid_codes.append(code)
+        if len(valid_codes) < 2:
+            logger.error(f"After filtering, only {len(valid_codes)} valid codes remain, at least 2 required")
+            raise HTTPException(status_code=400, detail="At least two non-empty code samples are required after filtering")
+
+        # Compute similarities
         similarities = {}
-        for i in range(len(input.codes)):
-            for j in range(i + 1, len(input.codes)):
-                code1 = input.codes[i].strip()
-                code2 = input.codes[j].strip()
-                if not code1 or not code2:
-                    continue
+        for i in range(len(valid_codes)):
+            for j in range(i + 1, len(valid_codes)):
+                code1 = valid_codes[i]
+                code2 = valid_codes[j]
+                logger.debug(f"Comparing codes at indices {i} and {j}")
                 similarity = compute_levenshtein_similarity(code1, code2) * 100
                 similarities[f"{i}-{j}"] = round(similarity, 2)
-        
+
         logger.info(f"Computed similarities: {similarities}")
         return {"similarities": similarities}
+    except HTTPException as he:
+        logger.error(f"HTTP error: {str(he)}")
+        raise
     except Exception as e:
-        logger.error(f"Error processing similarity: {str(e)}")
+        logger.error(f"Error processing similarity: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error processing similarity: {str(e)}")
 
 @app.get("/health")
 async def health_check():
+    logger.info("Health check endpoint accessed")
     return {"status": "healthy"}
 
 if __name__ == "__main__":
