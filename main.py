@@ -33,8 +33,8 @@ app.add_middleware(
 # -----------------------------------------------------
 try:
     # USE CODEBERTA-SMALL (84 MB)
-    tokenizer = AutoTokenizer.from_pretrained("huggingface/CodeBERTa-small-v1")
-    model = AutoModel.from_pretrained("huggingface/CodeBERTa-small-v1")
+    tokenizer = AutoTokenizer.from_pretrained("./codeberta")
+    model = AutoModel.from_pretrained("./codeberta")
 
 
 
