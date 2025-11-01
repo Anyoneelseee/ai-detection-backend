@@ -12,6 +12,8 @@ import os
 import uvicorn
 import traceback
 from typing import List
+import subprocess  # For git lfs pull
+import sys
 
 app = FastAPI()
 logging.basicConfig(level=logging.DEBUG)
@@ -29,25 +31,69 @@ app.add_middleware(
 )
 
 # -----------------------------------------------------
-# LOAD MODEL + TOKENIZER + SCALER (NO LFS!)
+# PULL LFS MODEL AT STARTUP (Render has git, but not git-lfs)
+# -----------------------------------------------------
+MODEL_DIR = "./codeberta"
+MODEL_FILE = os.path.join(MODEL_DIR, "pytorch_model.bin")
+LFS_MIN_SIZE = 100_000_000  # 100 MB
+
+def pull_lfs_model():
+    if not os.path.exists(MODEL_FILE):
+        logger.warning("Model file missing. Attempting to pull via Git LFS...")
+    elif os.path.getsize(MODEL_FILE) < LFS_MIN_SIZE:
+        logger.warning(f"Model file too small ({os.path.getsize(MODEL_FILE)} bytes). Likely LFS pointer. Pulling...")
+    else:
+        logger.info("Model file already downloaded and full size.")
+        return
+
+    # Try to pull using git lfs
+    try:
+        logger.info("Running: git lfs pull --include codeberta/pytorch_model.bin")
+        result = subprocess.run(
+            ["git", "lfs", "pull", "--include", "codeberta/pytorch_model.bin"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 minutes
+        )
+        logger.info("Git LFS pull successful.")
+        logger.debug(result.stdout)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Git LFS pull failed: {e.stderr}")
+        logger.info("Continuing without model — will crash on load.")
+    except FileNotFoundError:
+        logger.error("git command not found. Cannot pull LFS.")
+        logger.info("Falling back to offline mode.")
+    except subprocess.TimeoutExpired:
+        logger.error("Git LFS pull timed out after 5 minutes.")
+        logger.info("Continuing — model may be partial.")
+
+# Run LFS pull at startup
+pull_lfs_model()
+
+# -----------------------------------------------------
+# LOAD MODEL + TOKENIZER + SCALER
 # -----------------------------------------------------
 try:
-    # Model is now a normal file (336 MB) in repo
-    tokenizer = AutoTokenizer.from_pretrained("./codeberta")
-    model = AutoModel.from_pretrained("./codeberta")
+    logger.info("Loading tokenizer and model from ./codeberta...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+    model = AutoModel.from_pretrained(MODEL_DIR)
 
+    logger.info("Loading classifier from classifier.joblib...")
     model_bundle = joblib.load("classifier.joblib")
     classifier = model_bundle["model"]
     scaler = model_bundle["scaler"]
     threshold = model_bundle.get("threshold", 0.7)
 
+    logger.info("Loading reference code...")
     with open("reference_code.txt", "r", encoding="utf-8") as f:
         reference_code = f.read()
 
-    logger.info("Model, tokenizer, scaler, and reference code loaded (CodeBERTa-small, 336 MB)")
+    logger.info("All resources loaded successfully (CodeBERTa-small, ~336 MB)")
 
 except Exception as e:
-    logger.error(f"Failed to load resources: {str(e)}\n{traceback.format_exc()}")
+    logger.error(f"Failed to load resources: {str(e)}")
+    logger.error(traceback.format_exc())
     raise
 
 # -----------------------------------------------------
@@ -148,7 +194,7 @@ async def detect_ai_code(input: CodeInput):
         }
 
     except Exception as e:
-        logger.error(f"Error: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Error in /detect: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Server error")
 
 @app.post("/similarity")
