@@ -12,8 +12,6 @@ import os
 import uvicorn
 import traceback
 from typing import List
-import subprocess  # NEW: for git lfs pull
-import sys
 
 app = FastAPI()
 logging.basicConfig(level=logging.DEBUG)
@@ -31,44 +29,12 @@ app.add_middleware(
 )
 
 # -----------------------------------------------------
-# PULL LFS MODEL IF MISSING
-# -----------------------------------------------------
-MODEL_DIR = "./codeberta"
-MODEL_FILE = os.path.join(MODEL_DIR, "pytorch_model.bin")
-
-def pull_lfs_if_needed():
-    if not os.path.exists(MODEL_FILE):
-        logger.info("Model file missing. Pulling from Git LFS...")
-    elif os.path.getsize(MODEL_FILE) < 100_000_000:  # < 100 MB = pointer
-        logger.info("Model file too small (pointer). Pulling from Git LFS...")
-    else:
-        logger.info("Model already downloaded.")
-        return
-
-    try:
-        result = subprocess.run(
-            ["git", "lfs", "pull", "--include", "codeberta/pytorch_model.bin"],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        logger.info("LFS pull successful.")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Git LFS pull failed: {e.stderr}")
-        sys.exit(1)
-    except FileNotFoundError:
-        logger.error("git command not found. Is Git installed?")
-        sys.exit(1)
-
-# Run LFS pull at startup
-pull_lfs_if_needed()
-
-# -----------------------------------------------------
-# LOAD MODEL + TOKENIZER + SCALER
+# LOAD MODEL + TOKENIZER + SCALER (NO LFS!)
 # -----------------------------------------------------
 try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModel.from_pretrained(MODEL_DIR)
+    # Model is now a normal file (336 MB) in repo
+    tokenizer = AutoTokenizer.from_pretrained("./codeberta")
+    model = AutoModel.from_pretrained("./codeberta")
 
     model_bundle = joblib.load("classifier.joblib")
     classifier = model_bundle["model"]
@@ -78,7 +44,7 @@ try:
     with open("reference_code.txt", "r", encoding="utf-8") as f:
         reference_code = f.read()
 
-    logger.info("Model, tokenizer, scaler, and reference code loaded (CodeBERTa-small)")
+    logger.info("Model, tokenizer, scaler, and reference code loaded (CodeBERTa-small, 336 MB)")
 
 except Exception as e:
     logger.error(f"Failed to load resources: {str(e)}\n{traceback.format_exc()}")
